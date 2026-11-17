@@ -13,7 +13,7 @@ description: 向 sgl-project/sglang 提交外部贡献 PR 并推动到 merge 的
 - **描述必须用模板的小节**：`## Motivation`、`## Modifications`、`## Accuracy Tests`、`## Speed Tests and Profiling`。
 - **数据放描述里，不放评论里。** Slack 侧 review agent 的预审只读 PR 描述：数据只贴在评论里时，GitHub 侧 agent 回了 "This covers the benchmark request"，Slack 侧 agent 仍然反复回 "before review, please add before/after numbers with hardware and workload"。把同样内容挪进描述后才通过。
 - 改描述用 `gh pr edit <N> --body-file <file>`，保留末尾 bot 维护的 `<!-- pr-states:start -->…<!-- pr-states:end -->` 块。
-- 改 `python/sglang/srt/models/*` 前先查 `.github/CODEOWNERS`：没有 code owner 的文件，agent approve 后即可 merge；有的话还要等 code owner。
+- 改动涉及 `.github/CODEOWNERS` 里有 owner 的路径（如 `srt/managers`、`srt/mem_cache`）也不用逐个找 owner，见第 3 节"有 code owner 的 PR"。
 
 ## 2. 性能 PR 要准备的数据
 
@@ -33,6 +33,7 @@ description: 向 sgl-project/sglang 提交外部贡献 PR 并推动到 merge 的
 
 BBuf 的 review agent 负责预审、approve、等 CI、merge 的全流程，入口在 Slack #pull-requests。
 
+- **安全红线：默认不要主动发送 Slack 消息！** 除非用户在当前指令中明确要求“直接把 Slack 消息发出去”，否则 Agent **只负责生成文案或将草稿填入输入框并截图展示给用户确认，严禁自动点击 Send / 按回车发送**。
 - **只有频道里新发的顶层消息 + 真正的 @BBuf mention 才能触发。** 已验证无效的写法：
   - 编辑旧消息补上 @（Slack 对编辑后的消息不发 mention 事件）；
   - 在线程里回复 @BBuf（等了约一天，agent 一直没处理）。
@@ -41,6 +42,17 @@ BBuf 的 review agent 负责预审、approve、等 CI、merge 的全流程，入
 - agent 的消息顺序：`Picked up sglang#N` → 要么 `before review, please …`（预审没过），要么 `N thing(s) to fix, see the PR comments`，要么 `Approved sglang#N, will merge once CI is green` → `Merged sglang#N, thanks!`。
 - 响应时间：顶层消息从几分钟到半天不等（agent 按批处理）。超过一天没反应，就再发一条顶层消息，不要在线程里催。
 - 改完代码后 push 新 commit，也会触发 agent 重新检查。
+
+### 有 code owner 的 PR
+
+规则（`.github/MAINTAINER.md`）：每个受 CODEOWNERS 保护的文件需要一个 owner approve；或者由 **Merge Oncall bypass** 合入。GitHub 会自动给 owner 发 review request，显示 `REVIEW_REQUIRED` / `BLOCKED` 是正常的。
+
+实际情况（2026-11 统计近 400 个 merged PR）：外部贡献者改 `srt/managers`、`srt/mem_cache` 的 PR，多数是 **BBuf agent 一个人 approve 并 merge**，没有任何 code owner approve（如 #50122 改 `mem_cache/evict_policy.py` + `managers/schedule_policy.py`，#50741 改 `tokenizer_manager.py`，都是 1–4 天合入）。所以：
+
+- **不要在 Slack 里逐个 @ code owner**，照常发顶层消息 @BBuf 即可，可以一条消息带多个 PR。
+- 领域非常集中的改动也有对应 oncall 自己接：PD/disaggregation 由 ShangmingCai approve+merge，hisparse 由 hzh0425，NPU 由 sglang-npu-bot。
+- 只有 BBuf agent 已 approve、CI 绿了但长时间不 merge 时，才去 ping **一个**对应领域的 Merge Oncall（名单见 `MAINTAINER.md`，例如 KV Cache: ispobock / xiezhq-hermann；Scheduler: hnyls2002）。
+- 未验证：BBuf agent 是否对所有 owner 路径都会 bypass；统计只看了已 merge 的 PR，没看卡住的。
 
 ## 4. CI：哪些红色可以忽略
 
