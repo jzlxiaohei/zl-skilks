@@ -40,6 +40,8 @@ BBuf 的 review agent 负责预审、approve、等 CI、merge 的全流程，入
 - 写法：`Hi @BBuf, could your review agent take a look at <PR URL>? <一句话说明改了什么和数据>. Could you add the run-ci label? Thanks!`
 - 输入 `@BBuf` 后从弹出的候选里按回车选中，确认变成蓝色 mention 再发。Slack 编辑器会改写撇号和反引号（`they're` 变成 `they''e`，`` `run-ci` `` 的首字母丢失），所以避免使用这两类字符，发送前截图核对一遍。
 - agent 的消息顺序：`Picked up sglang#N` → 要么 `before review, please …`（预审没过），要么 `N thing(s) to fix, see the PR comments`，要么 `Approved sglang#N, will merge once CI is green` → `Merged sglang#N, thanks!`。
+- **2026-11 起 agent 有准入门槛**：原话 "We're keeping review time for bug fixes and changes with ≥3% end-to-end gains on mainstream models"（#50907），新增 flag/env var 也会被拒（#50924）。只有 microbenchmark、没有 E2E 数据的 `[Perf]` PR 会被挡回：#50932、#50978 等了约一天后，agent 在线程里回复 "Review starts once the PR has end-to-end numbers on current main, e.g. bench_serving on a mainstream model"。要的是**当前 main** 上的数据，PR 落后 main 较多时先 rebase 或在 main 上套 diff 再测。提交前先判断：输出不变、只是更慢的改动就是 `[Perf]`，不要为了过门槛改称 `[Fix]`（违反仓库"不要 host sync"之类的规则也仍是 perf）。perf PR 要么准备主流模型上 ≥3% 的 E2E 数据，要么如实写明收益小、直接找领域 Merge Oncall。
+  - 小 diff 的 perf PR 照样被合（11-14~11-18 BBuf 合了多个 +5~+80 行的 `[Perf]`），关键是有**针对受影响场景的 E2E 实测**，不是 diff 大小。最接近的先例 #50197（GDN state reset 去 host sync，+75/-2）挑了 Qwen3.5-0.8B 的 `/v1/score` 负载，测出 +17% req/s 和每请求 sync 次数 53→17；#46781（+5/-2）测了 `run_batch` -13.5%。只有 microbenchmark 的会被跳过或拒（#50907 "about 30 us per layer"）。
 - 响应时间：顶层消息从几分钟到半天不等（agent 按批处理）。超过一天没反应，就再发一条顶层消息，不要在线程里催。
 - 改完代码后 push 新 commit，也会触发 agent 重新检查。
 
@@ -89,9 +91,23 @@ done | sort | tail -15
 
 ## 6. 自己租 GPU 跑数据（RunPod）
 
-- 对第一个 PR 来说，A100 80GB 一卡完全够用（约 $1.8/hr）。SXM 没货时 PCIe 也可以；一次 kernel + E2E + gsm8k 总共花了 1–2 美元。
-- 环境：pip 受 PEP 668 限制，用 `uv` + venv；`SGLANG_BUILD_RUST_EXTS=none uv pip install -e python` 可以跳过 cargo。
+- 对第一个 PR 来说，A100 80GB 一卡完全够用（约 $1.8/hr；2026-11 已涨到 $2.09–2.19/hr，8B 模型用 L40S $1.12/hr 也够）。SXM 没货时 PCIe 也可以；一次 kernel + E2E + gsm8k 总共花了 1–2 美元。
+- 租之前逐项核对文档要求的 VRAM、**主机内存**、磁盘，留出余量。2026-11 曾在 125 GB 内存的机器上跑要求 ≥128 GB 的配置，启动时内存打满、SSH 无响应，白花约 6 美元。
+- 部署后立刻打开 pod 的 Logs → System 看拉镜像进度。有进度就等；长时间没日志、没进展才 Stop。
 - SSH 公钥没加到账号时，可以在 Jupyter terminal 里把公钥追加到 `~/.ssh/authorized_keys`。
+
+### 源码安装 main（每次都按这个来，以下坑都已重复踩过）
+
+```bash
+python3 -m venv venv && . venv/bin/activate && pip install -U pip uv
+export SGLANG_BUILD_RUST_EXTS=none   # 必须在第一次 install 之前设；pod 上没有 cargo，不设必失败
+uv pip install -e sglang/python
+export PYTHONPATH=$PWD/sglang/python  # pyproject 排除了 benchmark*，editable 安装后 import 不到 sglang.benchmark
+```
+
+- 服务端 benchmark 入口是 `python -m sglang.benchmark.serving`（旧的 `sglang.bench_serving` 已不存在），需要上面的 `PYTHONPATH`。
+- bench_serving 默认 `temperature=0`（greedy），greedy batch 会跳过 top-p/top-k/min-p 路径。测采样相关改动时用 `--backend sglang-oai-chat --dataset-name openai --dataset-path x.jsonl`，在每行里写 `temperature`/`top_p`/`min_p`。
+- 远程命令里不要用 `pkill -f sglang.launch_server` / `pgrep -f <脚本名>`：ssh 的命令文本本身包含这个字符串，会把自己杀掉或永远匹配成"运行中"。用 pid 文件、完成标记文件，或 `ps aux | grep "[l]aunch_server"`。
 - A100 是 sm80，用不了 fa3。各模型支持的 attention backend 不同（例如 Exaone4 只接受 fa3/triton/trtllm_mha），选 triton 就行。
 - **切换 before/after 代码时用 `git checkout <rev> -- <file>`，恢复必须用 `git checkout HEAD -- <file>`。** 用 `git checkout -- <file>` 会从已经被改写的 index 里恢复，结果仍是旧代码。每次跑之前都 `grep` 一下关键调用，确认跑的是哪一版。
 - 跑完立刻 Stop 并 Terminate pod，把日志和结果拷回本地留档（放在被 `.git/info/exclude` 忽略的目录里）。
